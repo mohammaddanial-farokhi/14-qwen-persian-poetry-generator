@@ -184,9 +184,27 @@ def remove_duplicates(df, subset=("poet", "poem"), keep="first", normalize=True)
     return df
 
 
+SEP = "<sep>"
+SOT = "<|startoftext|>"
+EOT = "<|endoftext|>"
+
+
+def _normalize_whitespace_to_sep(text: str) -> str:
+    text = re.sub(r"\s{2,}", f" {SEP} ", text)
+    return text.strip()
+
+
+def format_dataset(dataset):
+    poet = dataset["poet"].str.strip()
+    poem = dataset["poem_clean"].apply(_normalize_whitespace_to_sep)
+
+    return poet + " " + SOT + " " + poem + " " + EOT
+
+
 if __name__ == "__main__":
     # ==================== CONFIG ==================
     DATA_PATH = "data/poems.tsv"
+    MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 
     # ==================== STEP 1: Load dataset ====================
     raw_data = load_data(DATA_PATH)
@@ -196,4 +214,7 @@ if __name__ == "__main__":
 
     # ==================== STEP 2: preProcess ====================
     remove_dup_data = remove_duplicates(raw_data, subset=("poet", "poem"), normalize=True)
-    normalize_data = remove_dup_data["poem"].apply(lambda x: num_normalizer(x))
+
+    # Keep raw "poem"; store cleaned text in a new column for training.
+    remove_dup_data["poem_clean"] = remove_dup_data["poem"].apply(num_normalizer)
+    remove_dup_data["model_input"] = format_dataset(remove_dup_data)
