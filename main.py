@@ -1,15 +1,23 @@
 import hazm
 import re
-
-# def num_normalizer(text):
-#     """In Persian poetry, numbers are insignificant and should be removed."""
-
-#     _normalizer = hazm.Normalizer(persian_numbers=False)
-
-#     normall_text = _normalizer.normalize(text)
-#     return normall_text
+import json
+import pandas as pd
+import glob
+import numpy as np
+from tqdm import tqdm
 
 
+# =====================================================
+# 1. data
+# =====================================================
+def load_data(DATA_PATH):
+    main_data = pd.read_csv(DATA_PATH, sep="\t")
+    return main_data
+
+
+# =====================================================
+# 2. preProcess
+# ====================================================
 def num_normalizer(text: str) -> str:
     """Remove numbers as they are not important, and normalize the text."""
 
@@ -22,5 +30,8 @@ def num_normalizer(text: str) -> str:
 
 
 if __name__ == "__main__":
-    print()
-    print(num_normalizer("تست ي ي میخواهم می   خاهم می خواهم دو سه 2 3  "))
+    # ==================== CONFIG ==================
+    DATA_PATH = "data/poems.tsv"
+
+    # ==================== STEP 0: Load dataset ====================
+    raw_data = load_data(DATA_PATH)
