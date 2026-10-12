@@ -6,6 +6,10 @@ import glob
 import numpy as np
 from tqdm import tqdm
 from collections import Counter
+from pathlib import Path
+import torch
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
+from IPython.display import display
 
 
 # =====================================================
@@ -142,7 +146,7 @@ def dataset_first_look(df: pd.DataFrame, sample_size: int = 2, text_columns=None
 
 # =====================================================
 # 2. preProcess
-# ====================================================
+# =====================================================
 _NORMALIZER = hazm.Normalizer(persian_numbers=False)
 
 
@@ -180,7 +184,7 @@ def remove_duplicates(df, subset=("poet", "poem"), keep="first", normalize=True)
     df = df.reset_index(drop=True)
     after = len(df)
 
-    print(f"remove_duplicates: {before:,} -> {after:,} " f"(removed {before - after:,})")
+    # print(f"remove_duplicates: {before:,} -> {after:,} " f"(removed {before - after:,})")
     return df
 
 
@@ -201,6 +205,16 @@ def format_dataset(dataset):
     return poet + " " + SOT + " " + poem + " " + EOT
 
 
+# =====================================================
+# 3. model
+# =====================================================
+def load_model_and_tokenizer(model_name):
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    return model, tokenizer
+
+
 if __name__ == "__main__":
     # ==================== CONFIG ==================
     DATA_PATH = "data/poems.tsv"
@@ -218,3 +232,5 @@ if __name__ == "__main__":
     # Keep raw "poem"; store cleaned text in a new column for training.
     remove_dup_data["poem_clean"] = remove_dup_data["poem"].apply(num_normalizer)
     remove_dup_data["model_input"] = format_dataset(remove_dup_data)
+
+    finall_dataset = remove_dup_data
