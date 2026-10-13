@@ -212,7 +212,16 @@ def load_model_and_tokenizer(model_name):
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     return model, tokenizer
+
+
+def add_custom_tokens(model, tokenizer):
+    new_tokens = ["<|startoftext|>", "<sep>"]
+    tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+    model.resize_token_embeddings(len(tokenizer))
 
 
 if __name__ == "__main__":
@@ -234,3 +243,10 @@ if __name__ == "__main__":
     remove_dup_data["model_input"] = format_dataset(remove_dup_data)
 
     finall_dataset = remove_dup_data
+
+    # ==================== STEP 3: Load model & tokenizer ====================
+    base_model, base_tokenizer = load_model_and_tokenizer(MODEL_NAME)
+    add_custom_tokens(base_model, base_tokenizer)
+
+    print(f"Vocab:  {len(base_tokenizer)}")
+    print(f"Embeds: {base_model.get_input_embeddings().weight.shape[0]}")
