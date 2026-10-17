@@ -229,7 +229,7 @@ def add_custom_tokens(model, tokenizer):
 
 
 # =====================================================
-# 4. model
+# 4.
 # =====================================================
 def train_val_spliter(dataset):
     train_df, val_df = train_test_split(
@@ -240,6 +240,13 @@ def train_val_spliter(dataset):
     )
 
     return train_df, val_df
+
+
+def HF_datset_convertor(dataset1, dataset2):
+    hf_dataset1 = Dataset.from_pandas(dataset1, preserve_index=False)
+    hf_dataset2 = Dataset.from_pandas(dataset2, preserve_index=False)
+
+    return hf_dataset1, hf_dataset2
 
 
 if __name__ == "__main__":
@@ -268,7 +275,8 @@ if __name__ == "__main__":
     custom_tokenizer.save_pretrained("data/model/tokenizer_with_custom_tokens")
 
     # ==================== STEP 4: ====================
-    print(type(finall_dataset))
     train_data, valid_data = train_val_spliter(finall_dataset)
-    # print(type(train_data))
-    # print(train_data[0])
+    print(type(train_data))
+
+    train_data, valid_data = HF_datset_convertor(train_data, valid_data)
+    print(type(train_data))
