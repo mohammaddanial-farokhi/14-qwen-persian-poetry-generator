@@ -249,6 +249,49 @@ def HF_datset_convertor(dataset1, dataset2):
     return hf_dataset1, hf_dataset2
 
 
+# =====================================================
+# 5.
+# =====================================================
+def tokenize_and_mask(
+    custom_tokenizer, train_dataset, val_dataset, sot_token="<|startoftext|>"
+):
+    sot_id = custom_tokenizer.convert_tokens_to_ids(sot_token)
+
+    def _process_function(examples):
+        tokenized = custom_tokenizer(
+            examples["model_input"],
+            truncation=True,
+            max_length=512,
+        )
+
+        labels = [ids.copy() for ids in tokenized["input_ids"]]
+
+        for i in range(len(labels)):
+            try:
+                start_idx = labels[i].index(sot_id)
+                for j in range(start_idx + 1):
+                    labels[i][j] = -100
+            except ValueError:
+                labels[i] = [-100] * len(labels[i])
+
+        tokenized["labels"] = labels
+        return tokenized
+
+    tokenize_train_dataset = train_dataset.map(
+        _process_function,
+        batched=True,
+        remove_columns=train_dataset.column_names,
+    )
+
+    tokenize_val_dataset = val_dataset.map(
+        _process_function,
+        batched=True,
+        remove_columns=val_dataset.column_names,
+    )
+
+    return tokenize_train_dataset, tokenize_val_dataset
+
+
 if __name__ == "__main__":
     # ==================== CONFIG ==================
     DATA_PATH = "data/poems.tsv"
@@ -276,7 +319,13 @@ if __name__ == "__main__":
 
     # ==================== STEP 4: ====================
     train_data, valid_data = train_val_spliter(finall_dataset)
-    print(type(train_data))
+    # print(type(train_data))
 
     train_data, valid_data = HF_datset_convertor(train_data, valid_data)
-    print(type(train_data))
+    # print(type(train_data))
+    # print(train_data[0])
+
+    # ==================== STEP 5: ====================
+    tokenize_train_dataset, tokenize_val_dataset = tokenize_and_mask(
+        custom_tokenizer, train_data, valid_data
+    )
