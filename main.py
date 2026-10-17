@@ -245,65 +245,74 @@ def HF_datset_convertor(dataset1, dataset2):
 # =====================================================
 # 5.pre tarin
 # =====================================================
-def tokenize_and_mask(
-    custom_tokenizer, train_dataset, val_dataset, sot_token="<|startoftext|>"
-):
-    sot_id = custom_tokenizer.convert_tokens_to_ids(sot_token)
+def process_datasets(train_dataset, val_dataset, tokenizer, max_length=512):
+    def _tokenize_and_mask(batch):
+        prompt_encodings = tokenizer(batch["prompt"], add_special_tokens=False)["input_ids"]
+        response_encodings = tokenizer(batch["response"], add_special_tokens=False)[
+            "input_ids"
+        ]
 
-    def _process_function(examples):
-        tokenized = custom_tokenizer(
-            examples["model_input"],
-            truncation=True,
-            max_length=512,
-        )
+        input_ids = []
+        labels = []
+        attention_mask = []
 
-        labels = [ids.copy() for ids in tokenized["input_ids"]]
+        for prompt_ids, response_ids in zip(prompt_encodings, response_encodings):
+            combined_ids = prompt_ids + response_ids
 
-        for i in range(len(labels)):
-            try:
-                start_idx = labels[i].index(sot_id)
-                for j in range(start_idx + 1):
-                    labels[i][j] = -100
-            except ValueError:
-                labels[i] = [-100] * len(labels[i])
+            combined_labels = [-100] * len(prompt_ids) + response_ids
 
-        tokenized["labels"] = labels
-        return tokenized
+            if len(combined_ids) > max_length:
+                combined_ids = combined_ids[:max_length]
+                combined_labels = combined_labels[:max_length]
 
-    tokenize_train_dataset = train_dataset.map(
-        _process_function,
-        batched=True,
-        remove_columns=train_dataset.column_names,
+            input_ids.append(combined_ids)
+            labels.append(combined_labels)
+            attention_mask.append([1] * len(combined_ids))
+
+        return {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
+
+    train_dataset = train_dataset.map(
+        _tokenize_and_mask, batched=True, remove_columns=train_dataset.column_names
     )
 
-    tokenize_val_dataset = val_dataset.map(
-        _process_function,
-        batched=True,
-        remove_columns=val_dataset.column_names,
+    val_dataset = val_dataset.map(
+        _tokenize_and_mask, batched=True, remove_columns=val_dataset.column_names
     )
 
-    return tokenize_train_dataset, tokenize_val_dataset
+    print("✅ Data successfully tokenized and masked!")
+    print(f"Train size: {len(train_dataset)} | Val size: {len(val_dataset)}")
+
+    return train_dataset, val_dataset
 
 
-def build_bnb_config(model_path):
+import torch
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
+
+def load_quantized_model(model_name):
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=torch.float16,
         bnb_4bit_use_double_quant=True,
+        llm_int8_enable_fp32_cpu_offload=True,
     )
+
     quantized_model = AutoModelForCausalLM.from_pretrained(
-        model_path,
+        model_name,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map={"": "cuda:0"},
         trust_remote_code=True,
     )
+
     quantized_model = prepare_model_for_kbit_training(quantized_model)
+    quantized_model.gradient_checkpointing_enable()
 
     return quantized_model
 
 
-def build_peft_config(quantized_model):
+def apply_qlora(quantized_model):
     peft_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -324,12 +333,13 @@ def build_peft_config(quantized_model):
     qlora_model = get_peft_model(quantized_model, peft_config)
     qlora_model.config.use_cache = False
 
-    # check trainable parameters
     trainable_params = sum(p.numel() for p in qlora_model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in qlora_model.parameters())
+    print("=" * 40)
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Total parameters:     {total_params:,}")
     print(f"Trainable %:          {100 * trainable_params / total_params:.4f}%")
+    print("=" * 40)
 
     return qlora_model
 
@@ -348,11 +358,12 @@ if __name__ == "__main__":
     # ==================== STEP 2: preProcess ====================
     remove_dup_data = remove_duplicates(raw_data, subset=("poet", "poem"), normalize=True)
 
-    # Keep raw "poem"; store cleaned text in a new column for training.
     remove_dup_data["poem_clean"] = remove_dup_data["poem"].apply(num_normalizer)
-    remove_dup_data["model_input"] = format_dataset(remove_dup_data)
 
-    finall_dataset = remove_dup_data
+    finall_dataset = format_dataset_qwen(remove_dup_data)
+
+    print(finall_dataset.iloc[0]["prompt"])
+    print(finall_dataset.iloc[0]["response"])
 
     # ==================== STEP 3: Load model & tokenizer ====================
     base_model, base_tokenizer = load_model_and_tokenizer(MODEL_NAME)
@@ -366,9 +377,8 @@ if __name__ == "__main__":
     # print(train_data[0])
 
     # ==================== STEP 5: ====================
-    tokenize_train_dataset, tokenize_val_dataset = tokenize_and_mask(
-        custom_tokenizer, train_data, valid_data
-    )
+    train_dataset, val_dataset = process_datasets(train_data, valid_data, base_tokenizer)
 
     # ==================== STEP 6: ====================
-    # quantized_model = build_bnb_config(model_path)
+    quantized_model = load_quantized_model(MODEL_NAME)
+    qlora_model = apply_qlora(quantized_model)
