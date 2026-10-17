@@ -8,11 +8,12 @@ from tqdm import tqdm
 from collections import Counter
 from pathlib import Path
 import torch
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
 from IPython.display import display
 from torch.utils.data import random_split
 from sklearn.model_selection import train_test_split
 from datasets import Dataset
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 
 # =====================================================
@@ -191,21 +192,20 @@ def remove_duplicates(df, subset=("poet", "poem"), keep="first", normalize=True)
     return df
 
 
-SEP = "<sep>"
-SOT = "<|startoftext|>"
-EOT = "<|endoftext|>"
+# ==================== STEP 2: FORMAT (Qwen Native) ====================
 
 
-def _normalize_whitespace_to_sep(text: str) -> str:
-    text = re.sub(r"\s{2,}", f" {SEP} ", text)
-    return text.strip()
+def format_dataset_qwen(dataset):
+    poems = []
+    for poet, poem in zip(dataset["poet"], dataset["poem_clean"]):
+        poem_formatted = re.sub(r"\s{2,}", "\n", poem).strip()
 
+        prompt = f"<|im_start|>user\n{poet}<|im_end|>\n<|im_start|>assistant\n"
+        response = f"{poem_formatted}<|im_end|>"
 
-def format_dataset(dataset):
-    poet = dataset["poet"].str.strip()
-    poem = dataset["poem_clean"].apply(_normalize_whitespace_to_sep)
+        poems.append({"prompt": prompt, "response": response})
 
-    return poet + " " + SOT + " " + poem + " " + EOT
+    return pd.DataFrame(poems)
 
 
 # =====================================================
@@ -219,13 +219,6 @@ def load_model_and_tokenizer(model_name):
         tokenizer.pad_token = tokenizer.eos_token
 
     return model, tokenizer
-
-
-def add_custom_tokens(model, tokenizer):
-    new_tokens = ["<|startoftext|>", "<sep>"]
-    tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
-    model.resize_token_embeddings(len(tokenizer))
-    return tokenizer
 
 
 # =====================================================
@@ -250,7 +243,7 @@ def HF_datset_convertor(dataset1, dataset2):
 
 
 # =====================================================
-# 5.
+# 5.pre tarin
 # =====================================================
 def tokenize_and_mask(
     custom_tokenizer, train_dataset, val_dataset, sot_token="<|startoftext|>"
@@ -292,6 +285,55 @@ def tokenize_and_mask(
     return tokenize_train_dataset, tokenize_val_dataset
 
 
+def build_bnb_config(model_path):
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    )
+    quantized_model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        quantization_config=bnb_config,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    quantized_model = prepare_model_for_kbit_training(quantized_model)
+
+    return quantized_model
+
+
+def build_peft_config(quantized_model):
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+    )
+
+    qlora_model = get_peft_model(quantized_model, peft_config)
+    qlora_model.config.use_cache = False
+
+    # check trainable parameters
+    trainable_params = sum(p.numel() for p in qlora_model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in qlora_model.parameters())
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Total parameters:     {total_params:,}")
+    print(f"Trainable %:          {100 * trainable_params / total_params:.4f}%")
+
+    return qlora_model
+
+
 if __name__ == "__main__":
     # ==================== CONFIG ==================
     DATA_PATH = "data/poems.tsv"
@@ -314,8 +356,6 @@ if __name__ == "__main__":
 
     # ==================== STEP 3: Load model & tokenizer ====================
     base_model, base_tokenizer = load_model_and_tokenizer(MODEL_NAME)
-    custom_tokenizer = add_custom_tokens(base_model, base_tokenizer)
-    custom_tokenizer.save_pretrained("data/model/tokenizer_with_custom_tokens")
 
     # ==================== STEP 4: ====================
     train_data, valid_data = train_val_spliter(finall_dataset)
@@ -329,3 +369,6 @@ if __name__ == "__main__":
     tokenize_train_dataset, tokenize_val_dataset = tokenize_and_mask(
         custom_tokenizer, train_data, valid_data
     )
+
+    # ==================== STEP 6: ====================
+    # quantized_model = build_bnb_config(model_path)
