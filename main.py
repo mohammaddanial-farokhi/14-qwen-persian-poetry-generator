@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from IPython.display import display
+from torch.utils.data import random_split
 
 
 # =====================================================
@@ -222,6 +223,21 @@ def add_custom_tokens(model, tokenizer):
     new_tokens = ["<|startoftext|>", "<sep>"]
     tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
     model.resize_token_embeddings(len(tokenizer))
+    return tokenizer
+
+
+# =====================================================
+# 4. model
+# =====================================================
+def train_val_spliter(dataset):
+    train_size = int(len(dataset) * 0.9)
+    valid_size = int(len(dataset) - train_size)
+
+    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
+    print(f"train dataset size: {len(train_dataset)}")
+    print(f"train validation size: {len(valid_dataset)}")
+
+    return train_dataset, valid_dataset
 
 
 if __name__ == "__main__":
@@ -246,7 +262,8 @@ if __name__ == "__main__":
 
     # ==================== STEP 3: Load model & tokenizer ====================
     base_model, base_tokenizer = load_model_and_tokenizer(MODEL_NAME)
-    add_custom_tokens(base_model, base_tokenizer)
+    custom_tokenizer = add_custom_tokens(base_model, base_tokenizer)
+    custom_tokenizer.save_pretrained("data/model/tokenizer_with_custom_tokens")
 
-    print(f"Vocab:  {len(base_tokenizer)}")
-    print(f"Embeds: {base_model.get_input_embeddings().weight.shape[0]}")
+    # ==================== STEP 4: ====================
+    train_data, valid_data = train_val_spliter(finall_dataset)
