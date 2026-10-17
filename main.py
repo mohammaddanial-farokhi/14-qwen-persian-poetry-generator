@@ -11,6 +11,8 @@ import torch
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from IPython.display import display
 from torch.utils.data import random_split
+from sklearn.model_selection import train_test_split
+from datasets import Dataset
 
 
 # =====================================================
@@ -230,14 +232,14 @@ def add_custom_tokens(model, tokenizer):
 # 4. model
 # =====================================================
 def train_val_spliter(dataset):
-    train_size = int(len(dataset) * 0.9)
-    valid_size = int(len(dataset) - train_size)
+    train_df, val_df = train_test_split(
+        dataset,
+        test_size=0.1,
+        random_state=42,
+        shuffle=True,
+    )
 
-    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
-    print(f"train dataset size: {len(train_dataset)}")
-    print(f"train validation size: {len(valid_dataset)}")
-
-    return train_dataset, valid_dataset
+    return train_df, val_df
 
 
 if __name__ == "__main__":
@@ -266,4 +268,7 @@ if __name__ == "__main__":
     custom_tokenizer.save_pretrained("data/model/tokenizer_with_custom_tokens")
 
     # ==================== STEP 4: ====================
+    print(type(finall_dataset))
     train_data, valid_data = train_val_spliter(finall_dataset)
+    # print(type(train_data))
+    # print(train_data[0])
