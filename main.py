@@ -1,3 +1,4 @@
+import os
 import hazm
 import re
 import json
@@ -285,11 +286,6 @@ def process_datasets(train_dataset, val_dataset, tokenizer, max_length=512):
     return train_dataset, val_dataset
 
 
-import torch
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-
-
 def load_quantized_model(model_name):
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -333,21 +329,98 @@ def apply_qlora(quantized_model):
     qlora_model = get_peft_model(quantized_model, peft_config)
     qlora_model.config.use_cache = False
 
-    trainable_params = sum(p.numel() for p in qlora_model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in qlora_model.parameters())
-    print("=" * 40)
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Total parameters:     {total_params:,}")
-    print(f"Trainable %:          {100 * trainable_params / total_params:.4f}%")
-    print("=" * 40)
+    # trainable_params = sum(p.numel() for p in qlora_model.parameters() if p.requires_grad)
+    # total_params = sum(p.numel() for p in qlora_model.parameters())
+    # print("=" * 40)
+    # print(f"Trainable parameters: {trainable_params:,}")
+    # print(f"Total parameters:     {total_params:,}")
+    # print(f"Trainable %:          {100 * trainable_params / total_params:.4f}%")
+    # print("=" * 40)
 
     return qlora_model
+
+
+# =====================================================
+# 6.tarin
+# =====================================================
+
+
+def build_data_collator(tokenizer, model):
+    return DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        padding=True,
+        pad_to_multiple_of=8,
+    )
+
+
+def build_training_args(checkpoint_dir):
+    return TrainingArguments(
+        output_dir=checkpoint_dir,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=8,
+        optim="paged_adamw_8bit",
+        learning_rate=2e-4,
+        lr_scheduler_type="cosine",
+        num_train_epochs=1,
+        logging_steps=100,
+        evaluation_strategy="steps",
+        eval_steps=400,
+        save_strategy="steps",
+        save_steps=400,
+        save_total_limit=3,
+        bf16=True,
+        fp16=False,
+        max_grad_norm=0.3,
+        warmup_ratio=0.03,
+        group_by_length=True,
+        report_to="none",
+    )
+
+
+def train_and_save_model(
+    model, tokenizer, train_dataset, val_dataset, final_output_dir, checkpoint_dir
+):
+
+    if os.path.exists(final_output_dir) and os.path.exists(
+        os.path.join(final_output_dir, "adapter_config.json")
+    ):
+        print(f"Final model already exists at '{final_output_dir}'. Skipping training.")
+        return
+
+    data_collator = build_data_collator(tokenizer, model)
+    training_args = build_training_args(checkpoint_dir=checkpoint_dir)
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=data_collator,
+    )
+
+    checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
+
+    if checkpoints:
+        latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
+        print(f"Found previous checkpoints. Resuming from: {latest_checkpoint}")
+        trainer.train(resume_from_checkpoint=latest_checkpoint)
+    else:
+        print("No checkpoints found. Starting Training from scratch...")
+        trainer.train()
+
+    print(f"Saving final model to {final_output_dir}...")
+    trainer.model.save_pretrained(final_output_dir)
+    tokenizer.save_pretrained(final_output_dir)
+    print("Training and saving complete!")
 
 
 if __name__ == "__main__":
     # ==================== CONFIG ==================
     DATA_PATH = "data/poems.tsv"
     MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
+    CHECK_POINTS_PATH = "data/model/checkpoints"
+    FINAL_PEFT_MODEL = "data/model/final_model"
 
     # ==================== STEP 1: Load dataset ====================
     raw_data = load_data(DATA_PATH)
@@ -382,3 +455,13 @@ if __name__ == "__main__":
     # ==================== STEP 6: ====================
     quantized_model = load_quantized_model(MODEL_NAME)
     qlora_model = apply_qlora(quantized_model)
+
+    # ==================== STEP 7: ====================
+    train_and_save_model(
+        model=qlora_model,
+        tokenizer=base_tokenizer,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        final_output_dir=FINAL_PEFT_MODEL,
+        checkpoint_dir=CHECK_POINTS_PATH,
+    )
