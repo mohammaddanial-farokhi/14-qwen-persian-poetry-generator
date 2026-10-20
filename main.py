@@ -17,6 +17,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
+    TrainerCallback,
 )
 from IPython.display import display
 from torch.utils.data import random_split
@@ -382,7 +383,7 @@ def build_training_args(checkpoint_dir):
         num_train_epochs=1,
         logging_steps=100,
         eval_strategy="steps",
-        eval_steps=400,
+        eval_steps=1200,
         save_strategy="steps",
         save_steps=400,
         save_total_limit=3,
@@ -435,6 +436,125 @@ def build_training_args(checkpoint_dir):
 #     print("Training and saving complete!")
 
 
+def _print_training_checklist(trainer, training_args, expected_eval_steps):
+    """Prints a verification checklist before training starts."""
+    print("\n" + "=" * 50)
+    print("🔍 TRAINING SETUP VERIFICATION")
+    print("=" * 50)
+    print(f"1. Eval Strategy in Args : {training_args.eval_strategy}")
+    print(f"2. Eval Steps in Args    : {training_args.eval_steps}")
+    print(f"3. Save Steps in Args    : {training_args.save_steps}")
+
+    # دسترسی صحیح به کال‌بک‌ها در نسخه‌های جدید
+    try:
+        callback_names = [type(cb).__name__ for cb in trainer.callback_handler.callbacks]
+    except AttributeError:
+        callback_names = ["Unknown (cannot access callbacks)"]
+
+    print(f"4. Active Callbacks      : {callback_names}")
+
+    if "CustomEvalCallback" in callback_names:
+        print(
+            f"✅ CustomEvalCallback is successfully attached (Forcing eval every {expected_eval_steps} steps)."
+        )
+    else:
+        print(
+            "❌ WARNING: CustomEvalCallback is MISSING! Evaluation will run at default steps."
+        )
+    print("=" * 50 + "\n")
+
+
+# def train_with_sft(
+#     model, tokenizer, train_dataset, val_dataset, final_output_dir, checkpoint_dir
+# ):
+#     if os.path.exists(final_output_dir) and os.path.exists(
+#         os.path.join(final_output_dir, "adapter_config.json")
+#     ):
+#         print(f"Final model already exists at '{final_output_dir}'. Skipping training.")
+#         return
+
+#     class CustomEvalCallback(TrainerCallback):
+#         """Callback to force evaluation at custom intervals."""
+
+#         def __init__(self, eval_steps=800):
+#             self.eval_steps = eval_steps
+#             # این پرینت نشان می‌دهد که کالبک با چه تنظیماتی ساخته شده است
+#             print(
+#                 f"✅ [Setup] CustomEvalCallback initialized with eval_steps={self.eval_steps}"
+#             )
+
+#         def on_step_end(self, args, state, control, **kwargs):
+#             # اگر به استپ ۸۰۰، ۱۶۰۰، ۲۴۰۰ و ... رسیدیم
+#             if state.global_step > 0 and state.global_step % self.eval_steps == 0:
+#                 # این پرینت دقیقاً در ترمینال به ما می‌گوید که ارزیابی اجباری شد
+#                 print(
+#                     f"\n🔄 [Callback Action] Step {state.global_step} reached. Forcing evaluation now...\n"
+#                 )
+#                 control.should_evaluate = True
+#             return control
+
+#     training_args = TrainingArguments(
+#         output_dir=checkpoint_dir,
+#         per_device_train_batch_size=2,
+#         gradient_accumulation_steps=8,
+#         optim="paged_adamw_8bit",
+#         learning_rate=2e-4,
+#         lr_scheduler_type="cosine",
+#         num_train_epochs=1,
+#         logging_steps=100,
+#         eval_strategy="steps",
+#         eval_steps=1200,
+#         save_strategy="steps",
+#         save_steps=400,
+#         save_total_limit=2,
+#         bf16=False,
+#         fp16=True,
+#         max_grad_norm=0.3,
+#         warmup_steps=100,
+#         report_to="none",
+#         dataloader_num_workers=0,
+#     )
+
+#     # ۲. توکنایز کردن قالب پاسخ (برای جلوگیری از خطاهای SFTTrainer)
+#     response_template_ids = tokenizer.encode(
+#         "<|im_start|>assistant\n", add_special_tokens=False
+#     )
+#     collator = DataCollatorForCompletionOnlyLM(
+#         response_template=response_template_ids,
+#         tokenizer=tokenizer,
+#     )
+
+#     # ۳. تعریف SFTTrainer
+#     custom_eval_callback = CustomEvalCallback(eval_steps=800)
+#     trainer = SFTTrainer(
+#         model=model,
+#         tokenizer=tokenizer,
+#         train_dataset=train_dataset,
+#         eval_dataset=val_dataset,
+#         dataset_text_field="text",
+#         max_seq_length=256,
+#         data_collator=collator,
+#         args=training_args,
+#         callbacks=[custom_eval_callback],
+#     )
+
+#     # ۴. بررسی چک‌پوینت‌ها و شروع آموزش
+#     checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
+#     if checkpoints:
+#         latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
+#         print(f"Found previous checkpoints. Resuming from: {latest_checkpoint}")
+#         trainer.train(resume_from_checkpoint=latest_checkpoint)
+#     else:
+#         print("No checkpoints found. Starting Training from scratch...")
+#         trainer.train()
+
+#     # ۵. ذخیره مدل
+#     print(f"Saving final model to {final_output_dir}...")
+#     trainer.model.save_pretrained(final_output_dir)
+#     tokenizer.save_pretrained(final_output_dir)
+#     print("Training and saving complete!")
+
+
 def train_with_sft(
     model, tokenizer, train_dataset, val_dataset, final_output_dir, checkpoint_dir
 ):
@@ -444,20 +564,37 @@ def train_with_sft(
         print(f"Final model already exists at '{final_output_dir}'. Skipping training.")
         return
 
+    class CustomEvalCallback(TrainerCallback):
+        def __init__(self, eval_steps=1200):
+            self.eval_steps = eval_steps
+            print(
+                f"✅ [Setup] CustomEvalCallback initialized with eval_steps={self.eval_steps}"
+            )
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step > 0 and state.global_step % self.eval_steps == 0:
+                print(
+                    f"\n🔄 [Callback Action] Step {state.global_step} reached. Forcing evaluation now...\n"
+                )
+                control.should_evaluate = True
+            return control
+
+    # تنظیمات یکپارچه و بهینه
     training_args = TrainingArguments(
         output_dir=checkpoint_dir,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=8,
-        optim="paged_adamw_8bit",
+        optim="paged_adamw_8bit",  # فاصله اضافه در انتهای کلمه حذف شد
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         num_train_epochs=1,
         logging_steps=100,
-        eval_strategy="steps",
-        eval_steps=1200,
+        eval_strategy="no",
+        eval_steps=1200,  # <--- عدد ۱۲۰۰ برای هماهنگی
         save_strategy="steps",
         save_steps=400,
         save_total_limit=2,
+        save_safetensors=True,  # جلوگیری از خرابی چک‌پوینت
         bf16=False,
         fp16=True,
         max_grad_norm=0.3,
@@ -466,7 +603,6 @@ def train_with_sft(
         dataloader_num_workers=0,
     )
 
-    # ۲. توکنایز کردن قالب پاسخ (برای جلوگیری از خطاهای SFTTrainer)
     response_template_ids = tokenizer.encode(
         "<|im_start|>assistant\n", add_special_tokens=False
     )
@@ -475,7 +611,9 @@ def train_with_sft(
         tokenizer=tokenizer,
     )
 
-    # ۳. تعریف SFTTrainer
+    # کال‌بک را روی ۱۲۰۰ تنظیم می‌کنیم
+    custom_eval_callback = CustomEvalCallback(eval_steps=1200)
+
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -485,39 +623,27 @@ def train_with_sft(
         max_seq_length=256,
         data_collator=collator,
         args=training_args,
-    )
-    print("\n========== SEQUENCE LENGTH CHECK ==========")
-
-    print(
-        "Configured max_seq_length:",
-        getattr(trainer, "max_seq_length", "Attribute not exposed"),
+        callbacks=[custom_eval_callback],
     )
 
-    dataset = trainer.train_dataset
+    # 👇 چک‌لیست با اعداد جدید
+    _print_training_checklist(trainer, training_args, expected_eval_steps=1200)
 
-    if "input_ids" in dataset.column_names:
-        lengths = [len(ids) for ids in dataset["input_ids"]]
-
-        print("Maximum actual sequence length:", max(lengths))
-        print("Samples longer than 128:", sum(n > 128 for n in lengths))
-        print("Samples longer than 256:", sum(n > 256 for n in lengths))
-        print("Samples exactly 256:", sum(n == 256 for n in lengths))
-    else:
-        print("input_ids not found. Dataset columns:", dataset.column_names)
-
-    print("===========================================\n")
-
-    # ۴. بررسی چک‌پوینت‌ها و شروع آموزش
+    # شروع امن آموزش
     checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
     if checkpoints:
         latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
         print(f"Found previous checkpoints. Resuming from: {latest_checkpoint}")
-        trainer.train(resume_from_checkpoint=latest_checkpoint)
+        try:
+            trainer.train(resume_from_checkpoint=latest_checkpoint)
+        except Exception as e:
+            print(f"\n⚠️ ERROR loading checkpoint: {e}")
+            print("The checkpoint might be corrupted. Starting from scratch...\n")
+            trainer.train()
     else:
         print("No checkpoints found. Starting Training from scratch...")
         trainer.train()
 
-    # ۵. ذخیره مدل
     print(f"Saving final model to {final_output_dir}...")
     trainer.model.save_pretrained(final_output_dir)
     tokenizer.save_pretrained(final_output_dir)
