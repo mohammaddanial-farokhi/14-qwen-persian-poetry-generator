@@ -444,18 +444,17 @@ def train_with_sft(
         print(f"Final model already exists at '{final_output_dir}'. Skipping training.")
         return
 
-    # ۱. تنظیمات بهینه برای RTX 4060
     training_args = TrainingArguments(
         output_dir=checkpoint_dir,
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=2,
         gradient_accumulation_steps=8,
-        optim="paged_adamw_8bit",  # <--- تغییر مهم: استفاده از بهینه‌ساز ۸ بیتی
+        optim="paged_adamw_8bit",
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         num_train_epochs=1,
         logging_steps=100,
         eval_strategy="steps",
-        eval_steps=400,
+        eval_steps=1200,
         save_strategy="steps",
         save_steps=400,
         save_total_limit=2,
@@ -483,10 +482,30 @@ def train_with_sft(
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         dataset_text_field="text",
-        max_seq_length=128,
+        max_seq_length=256,
         data_collator=collator,
         args=training_args,
     )
+    print("\n========== SEQUENCE LENGTH CHECK ==========")
+
+    print(
+        "Configured max_seq_length:",
+        getattr(trainer, "max_seq_length", "Attribute not exposed"),
+    )
+
+    dataset = trainer.train_dataset
+
+    if "input_ids" in dataset.column_names:
+        lengths = [len(ids) for ids in dataset["input_ids"]]
+
+        print("Maximum actual sequence length:", max(lengths))
+        print("Samples longer than 128:", sum(n > 128 for n in lengths))
+        print("Samples longer than 256:", sum(n > 256 for n in lengths))
+        print("Samples exactly 256:", sum(n == 256 for n in lengths))
+    else:
+        print("input_ids not found. Dataset columns:", dataset.column_names)
+
+    print("===========================================\n")
 
     # ۴. بررسی چک‌پوینت‌ها و شروع آموزش
     checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
@@ -547,7 +566,7 @@ if __name__ == "__main__":
     train_with_sft(
         model=qlora_model,
         tokenizer=base_tokenizer,
-        train_dataset=train_dataset,  # دیتاست خام (با ستون text) را مستقیم می‌فرستیم
+        train_dataset=train_dataset,
         val_dataset=val_dataset,
         final_output_dir=FINAL_PEFT_MODEL,
         checkpoint_dir=CHECK_POINTS_PATH,
