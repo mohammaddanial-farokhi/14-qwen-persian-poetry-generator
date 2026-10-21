@@ -1,43 +1,36 @@
 import os
-import hazm
-import re
-import json
-import pandas as pd
 import glob
+import json
+import re
+import pandas as pd
 import numpy as np
-from tqdm import tqdm
-from collections import Counter
-from pathlib import Path
+import hazm
 import torch
-from transformers import (
-    AutoTokenizer,
-    AutoConfig,
-    AutoModelForCausalLM,
-    BitsAndBytesConfig,
-    DataCollatorForSeq2Seq,
-    Trainer,
-    TrainingArguments,
-    TrainerCallback,
-)
-from IPython.display import display
-from torch.utils.data import random_split
+from collections import Counter
 from sklearn.model_selection import train_test_split
 from datasets import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    BitsAndBytesConfig,
+    TrainerCallback,
+    TrainingArguments,
+)
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
 
 # =====================================================
-# 1. data
+# 1. DATA LOADING & ANALYSIS
 # =====================================================
 def load_data(DATA_PATH):
+    """Load the main dataset from a TSV file."""
     main_data = pd.read_csv(DATA_PATH, sep="\t")
     return main_data
 
 
 def dataset_first_look(df: pd.DataFrame, sample_size: int = 2, text_columns=None):
-    """Quick first-look analysis of a dataframe (for Persian poetry)."""
-
+    """Perform a quick initial analysis of the dataframe (for Persian poetry)."""
     line = "=" * 70
     print(f"\n{line}\nDATASET FIRST LOOK\n{line}")
 
@@ -87,7 +80,6 @@ def dataset_first_look(df: pd.DataFrame, sample_size: int = 2, text_columns=None
 
     # ---------- 6) Text length distribution ----------
     print("\n[6] TEXT LENGTH DISTRIBUTION")
-
     if text_columns is None:
         text_columns = [c for c in df.columns if df[c].dtype == object]
     print(f"    (columns: {text_columns})")
@@ -160,28 +152,27 @@ def dataset_first_look(df: pd.DataFrame, sample_size: int = 2, text_columns=None
 
 
 # =====================================================
-# 2. preProcess
+# 2. DATA PREPROCESSING
 # =====================================================
 _NORMALIZER = hazm.Normalizer(persian_numbers=False)
 
 
 def num_normalizer(text: str) -> str:
-    """Remove numbers as they are not important, and normalize the text."""
-
+    """Normalize Persian text and remove all digits (Latin, Persian, Arabic)."""
     normalized_text = _NORMALIZER.normalize(text)
-    no_digits_text = re.sub(
-        r"[0-9۰-۹٠-٩]+", "", normalized_text
-    )  # latin, persian, arabic numbers
+    no_digits_text = re.sub(r"[0-9۰-۹٠-٩]+", "", normalized_text)
     return no_digits_text.strip()
 
 
 def _normalize_for_dedup(text: str) -> str:
+    """Helper to normalize text specifically for duplicate detection."""
     text = text.replace("\u200c", " ")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def remove_duplicates(df, subset=("poet", "poem"), keep="first", normalize=True):
+    """Remove duplicate rows based on specified columns with optional normalization."""
     before = len(df)
 
     if normalize:
@@ -198,28 +189,11 @@ def remove_duplicates(df, subset=("poet", "poem"), keep="first", normalize=True)
 
     df = df.reset_index(drop=True)
     after = len(df)
-
-    # print(f"remove_duplicates: {before:,} -> {after:,} " f"(removed {before - after:,})")
     return df
 
 
-# ==================== STEP 2: FORMAT (Qwen Native) ====================
-
-
-# def format_dataset_qwen(dataset):
-#     poems = []
-#     for poet, poem in zip(dataset["poet"], dataset["poem_clean"]):
-#         poem_formatted = re.sub(r"\s{2,}", "\n", poem).strip()
-
-#         prompt = f"<|im_start|>user\n{poet}<|im_end|>\n<|im_start|>assistant\n"
-#         response = f"{poem_formatted}<|im_end|>"
-
-#         poems.append({"prompt": prompt, "response": response})
-
-#     return pd.DataFrame(poems)
-
-
 def format_for_sft(dataset):
+    """Format the dataset into a single 'text' column using Qwen's chat template."""
     texts = []
     for poet, poem in zip(dataset["poet"], dataset["poem_clean"]):
         poem_formatted = re.sub(r"\s{2,}", "\n", poem).strip()
@@ -231,9 +205,31 @@ def format_for_sft(dataset):
 
 
 # =====================================================
-# 3. model
+# 3. DATASET SPLITTING & CONVERSION
+# =====================================================
+def train_val_splitter(dataset):
+    """Split the dataset into train and validation sets (90/10 ratio)."""
+    train_df, val_df = train_test_split(
+        dataset,
+        test_size=0.1,
+        random_state=42,
+        shuffle=True,
+    )
+    return train_df, val_df
+
+
+def hf_dataset_converter(dataset1, dataset2):
+    """Convert pandas DataFrames into Hugging Face Dataset objects."""
+    hf_dataset1 = Dataset.from_pandas(dataset1, preserve_index=False)
+    hf_dataset2 = Dataset.from_pandas(dataset2, preserve_index=False)
+    return hf_dataset1, hf_dataset2
+
+
+# =====================================================
+# 4. MODEL LOADING & QLORA SETUP
 # =====================================================
 def load_model_and_tokenizer(model_name):
+    """Load a standard (non-quantized) model and tokenizer."""
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -243,71 +239,8 @@ def load_model_and_tokenizer(model_name):
     return model, tokenizer
 
 
-# =====================================================
-# 4.
-# =====================================================
-def train_val_spliter(dataset):
-    train_df, val_df = train_test_split(
-        dataset,
-        test_size=0.1,
-        random_state=42,
-        shuffle=True,
-    )
-
-    return train_df, val_df
-
-
-def HF_datset_convertor(dataset1, dataset2):
-    hf_dataset1 = Dataset.from_pandas(dataset1, preserve_index=False)
-    hf_dataset2 = Dataset.from_pandas(dataset2, preserve_index=False)
-
-    return hf_dataset1, hf_dataset2
-
-
-# =====================================================
-# 5.pre tarin
-# =====================================================
-def process_datasets(train_dataset, val_dataset, tokenizer, max_length=256):
-    def _tokenize_and_mask(batch):
-        prompt_encodings = tokenizer(batch["prompt"], add_special_tokens=False)["input_ids"]
-        response_encodings = tokenizer(batch["response"], add_special_tokens=False)[
-            "input_ids"
-        ]
-
-        input_ids = []
-        labels = []
-        attention_mask = []
-
-        for prompt_ids, response_ids in zip(prompt_encodings, response_encodings):
-            combined_ids = prompt_ids + response_ids
-
-            combined_labels = [-100] * len(prompt_ids) + response_ids
-
-            if len(combined_ids) > max_length:
-                combined_ids = combined_ids[:max_length]
-                combined_labels = combined_labels[:max_length]
-
-            input_ids.append(combined_ids)
-            labels.append(combined_labels)
-            attention_mask.append([1] * len(combined_ids))
-
-        return {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
-
-    train_dataset = train_dataset.map(
-        _tokenize_and_mask, batched=True, remove_columns=train_dataset.column_names
-    )
-
-    val_dataset = val_dataset.map(
-        _tokenize_and_mask, batched=True, remove_columns=val_dataset.column_names
-    )
-
-    print("✅ Data successfully tokenized and masked!")
-    print(f"Train size: {len(train_dataset)} | Val size: {len(val_dataset)}")
-
-    return train_dataset, val_dataset
-
-
 def load_quantized_model(model_name):
+    """Load the base model with 4-bit quantization (QLoRA)."""
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -322,10 +255,6 @@ def load_quantized_model(model_name):
         trust_remote_code=True,
         attn_implementation="sdpa",
     )
-    # quantized_model = prepare_model_for_kbit_training(quantized_model)
-    # quantized_model.gradient_checkpointing_enable(
-    #     gradient_checkpointing_kwargs={"use_reentrant": False}
-    # )
 
     quantized_model = prepare_model_for_kbit_training(
         quantized_model,
@@ -335,6 +264,7 @@ def load_quantized_model(model_name):
 
 
 def apply_qlora(quantized_model):
+    """Apply LoRA adapters to the quantized model for fine-tuning."""
     peft_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -347,97 +277,14 @@ def apply_qlora(quantized_model):
     qlora_model = get_peft_model(quantized_model, peft_config)
     qlora_model.config.use_cache = False
 
-    # trainable_params = sum(p.numel() for p in qlora_model.parameters() if p.requires_grad)
-    # total_params = sum(p.numel() for p in qlora_model.parameters())
-    # print("=" * 40)
-    # print(f"Trainable parameters: {trainable_params:,}")
-    # print(f"Total parameters:     {total_params:,}")
-    # print(f"Trainable %:          {100 * trainable_params / total_params:.4f}%")
-    # print("=" * 40)
-
     return qlora_model
 
 
 # =====================================================
-# 6.tarin
+# 5. TRAINING SETUP & EXECUTION
 # =====================================================
-
-
-def build_data_collator(tokenizer, model):
-    return DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        padding=True,
-        pad_to_multiple_of=8,
-    )
-
-
-def build_training_args(checkpoint_dir):
-    return TrainingArguments(
-        output_dir=checkpoint_dir,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
-        optim="paged_adamw_8bit ",
-        learning_rate=2e-4,
-        lr_scheduler_type="cosine",
-        num_train_epochs=1,
-        logging_steps=100,
-        eval_strategy="steps",
-        eval_steps=1200,
-        save_strategy="steps",
-        save_steps=400,
-        save_total_limit=3,
-        bf16=True,
-        fp16=False,
-        max_grad_norm=0.3,
-        warmup_steps=200,
-        report_to="none",
-        dataloader_num_workers=0,
-        dataloader_pin_memory=True,
-        disable_tqdm=False,
-        group_by_length=True,
-    )
-
-
-# def train_and_save_model(
-#     model, tokenizer, train_dataset, val_dataset, final_output_dir, checkpoint_dir
-# ):
-
-#     if os.path.exists(final_output_dir) and os.path.exists(
-#         os.path.join(final_output_dir, "adapter_config.json")
-#     ):
-#         print(f"Final model already exists at '{final_output_dir}'. Skipping training.")
-#         return
-
-#     data_collator = build_data_collator(tokenizer, model)
-#     training_args = build_training_args(checkpoint_dir=checkpoint_dir)
-
-#     trainer = Trainer(
-#         model=model,
-#         args=training_args,
-#         train_dataset=train_dataset,
-#         eval_dataset=val_dataset,
-#         data_collator=data_collator,
-#     )
-
-#     checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
-
-#     if checkpoints:
-#         latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
-#         print(f"Found previous checkpoints. Resuming from: {latest_checkpoint}")
-#         trainer.train(resume_from_checkpoint=latest_checkpoint)
-#     else:
-#         print("No checkpoints found. Starting Training from scratch...")
-#         trainer.train()
-
-#     print(f"Saving final model to {final_output_dir}...")
-#     trainer.model.save_pretrained(final_output_dir)
-#     tokenizer.save_pretrained(final_output_dir)
-#     print("Training and saving complete!")
-
-
 def _print_training_checklist(trainer, training_args, expected_eval_steps):
-    """Prints a verification checklist before training starts."""
+    """Print a verification checklist before training starts."""
     print("\n" + "=" * 50)
     print("🔍 TRAINING SETUP VERIFICATION")
     print("=" * 50)
@@ -445,7 +292,6 @@ def _print_training_checklist(trainer, training_args, expected_eval_steps):
     print(f"2. Eval Steps in Args    : {training_args.eval_steps}")
     print(f"3. Save Steps in Args    : {training_args.save_steps}")
 
-    # دسترسی صحیح به کال‌بک‌ها در نسخه‌های جدید
     try:
         callback_names = [type(cb).__name__ for cb in trainer.callback_handler.callbacks]
     except AttributeError:
@@ -464,100 +310,10 @@ def _print_training_checklist(trainer, training_args, expected_eval_steps):
     print("=" * 50 + "\n")
 
 
-# def train_with_sft(
-#     model, tokenizer, train_dataset, val_dataset, final_output_dir, checkpoint_dir
-# ):
-#     if os.path.exists(final_output_dir) and os.path.exists(
-#         os.path.join(final_output_dir, "adapter_config.json")
-#     ):
-#         print(f"Final model already exists at '{final_output_dir}'. Skipping training.")
-#         return
-
-#     class CustomEvalCallback(TrainerCallback):
-#         """Callback to force evaluation at custom intervals."""
-
-#         def __init__(self, eval_steps=800):
-#             self.eval_steps = eval_steps
-#             # این پرینت نشان می‌دهد که کالبک با چه تنظیماتی ساخته شده است
-#             print(
-#                 f"✅ [Setup] CustomEvalCallback initialized with eval_steps={self.eval_steps}"
-#             )
-
-#         def on_step_end(self, args, state, control, **kwargs):
-#             # اگر به استپ ۸۰۰، ۱۶۰۰، ۲۴۰۰ و ... رسیدیم
-#             if state.global_step > 0 and state.global_step % self.eval_steps == 0:
-#                 # این پرینت دقیقاً در ترمینال به ما می‌گوید که ارزیابی اجباری شد
-#                 print(
-#                     f"\n🔄 [Callback Action] Step {state.global_step} reached. Forcing evaluation now...\n"
-#                 )
-#                 control.should_evaluate = True
-#             return control
-
-#     training_args = TrainingArguments(
-#         output_dir=checkpoint_dir,
-#         per_device_train_batch_size=2,
-#         gradient_accumulation_steps=8,
-#         optim="paged_adamw_8bit",
-#         learning_rate=2e-4,
-#         lr_scheduler_type="cosine",
-#         num_train_epochs=1,
-#         logging_steps=100,
-#         eval_strategy="steps",
-#         eval_steps=1200,
-#         save_strategy="steps",
-#         save_steps=400,
-#         save_total_limit=2,
-#         bf16=False,
-#         fp16=True,
-#         max_grad_norm=0.3,
-#         warmup_steps=100,
-#         report_to="none",
-#         dataloader_num_workers=0,
-#     )
-
-#     # ۲. توکنایز کردن قالب پاسخ (برای جلوگیری از خطاهای SFTTrainer)
-#     response_template_ids = tokenizer.encode(
-#         "<|im_start|>assistant\n", add_special_tokens=False
-#     )
-#     collator = DataCollatorForCompletionOnlyLM(
-#         response_template=response_template_ids,
-#         tokenizer=tokenizer,
-#     )
-
-#     # ۳. تعریف SFTTrainer
-#     custom_eval_callback = CustomEvalCallback(eval_steps=800)
-#     trainer = SFTTrainer(
-#         model=model,
-#         tokenizer=tokenizer,
-#         train_dataset=train_dataset,
-#         eval_dataset=val_dataset,
-#         dataset_text_field="text",
-#         max_seq_length=256,
-#         data_collator=collator,
-#         args=training_args,
-#         callbacks=[custom_eval_callback],
-#     )
-
-#     # ۴. بررسی چک‌پوینت‌ها و شروع آموزش
-#     checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
-#     if checkpoints:
-#         latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
-#         print(f"Found previous checkpoints. Resuming from: {latest_checkpoint}")
-#         trainer.train(resume_from_checkpoint=latest_checkpoint)
-#     else:
-#         print("No checkpoints found. Starting Training from scratch...")
-#         trainer.train()
-
-#     # ۵. ذخیره مدل
-#     print(f"Saving final model to {final_output_dir}...")
-#     trainer.model.save_pretrained(final_output_dir)
-#     tokenizer.save_pretrained(final_output_dir)
-#     print("Training and saving complete!")
-
-
 def train_with_sft(
     model, tokenizer, train_dataset, val_dataset, final_output_dir, checkpoint_dir
 ):
+    """Train the QLoRA model using SFTTrainer and save the final artifacts."""
     if os.path.exists(final_output_dir) and os.path.exists(
         os.path.join(final_output_dir, "adapter_config.json")
     ):
@@ -565,6 +321,8 @@ def train_with_sft(
         return
 
     class CustomEvalCallback(TrainerCallback):
+        """Callback to force evaluation at custom intervals."""
+
         def __init__(self, eval_steps=1200):
             self.eval_steps = eval_steps
             print(
@@ -572,6 +330,7 @@ def train_with_sft(
             )
 
         def on_step_end(self, args, state, control, **kwargs):
+            """Trigger evaluation when reaching custom step intervals."""
             if state.global_step > 0 and state.global_step % self.eval_steps == 0:
                 print(
                     f"\n🔄 [Callback Action] Step {state.global_step} reached. Forcing evaluation now...\n"
@@ -579,22 +338,22 @@ def train_with_sft(
                 control.should_evaluate = True
             return control
 
-    # تنظیمات یکپارچه و بهینه
+    # Optimized training arguments
     training_args = TrainingArguments(
         output_dir=checkpoint_dir,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=8,
-        optim="paged_adamw_8bit",  # فاصله اضافه در انتهای کلمه حذف شد
+        optim="paged_adamw_8bit",
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         num_train_epochs=1,
         logging_steps=100,
         eval_strategy="no",
-        eval_steps=1200,  # <--- عدد ۱۲۰۰ برای هماهنگی
+        eval_steps=1200,
         save_strategy="steps",
         save_steps=400,
         save_total_limit=2,
-        save_safetensors=True,  # جلوگیری از خرابی چک‌پوینت
+        save_safetensors=True,  # Prevent checkpoint corruption
         bf16=False,
         fp16=True,
         max_grad_norm=0.3,
@@ -611,7 +370,6 @@ def train_with_sft(
         tokenizer=tokenizer,
     )
 
-    # کال‌بک را روی ۱۲۰۰ تنظیم می‌کنیم
     custom_eval_callback = CustomEvalCallback(eval_steps=1200)
 
     trainer = SFTTrainer(
@@ -626,10 +384,9 @@ def train_with_sft(
         callbacks=[custom_eval_callback],
     )
 
-    # 👇 چک‌لیست با اعداد جدید
     _print_training_checklist(trainer, training_args, expected_eval_steps=1200)
 
-    # شروع امن آموزش
+    # Safe training start with checkpoint resuming
     checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
     if checkpoints:
         latest_checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
@@ -651,40 +408,33 @@ def train_with_sft(
 
 
 if __name__ == "__main__":
-    # ==================== CONFIG ==================
+    # ==================== CONFIG ====================
     DATA_PATH = "data/poems.tsv"
     MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
     CHECK_POINTS_PATH = "data/model/checkpoints"
     FINAL_PEFT_MODEL = "data/model/final_model"
 
-    # ==================== STEP 1: Load dataset ====================
+    # ==================== STEP 1: Load Dataset ====================
     raw_data = load_data(DATA_PATH)
 
-    # ==================== STEP 2: preProcess ====================
+    # ==================== STEP 2: Preprocess Data ====================
     remove_dup_data = remove_duplicates(raw_data, subset=("poet", "poem"), normalize=True)
     remove_dup_data["poem_clean"] = remove_dup_data["poem"].apply(num_normalizer)
 
-    # فرمت‌دهی به شکل تک‌ستونی (SFT)
-    finall_dataset = format_for_sft(remove_dup_data)
+    # Format into a single text column for SFTTrainer
+    final_dataset = format_for_sft(remove_dup_data)
 
-    # چاپ اولین نمونه برای تست (حالا ستون text داریم)
-    print(finall_dataset.iloc[0]["text"][:200], "...")  # ۲۰۰ کاراکتر اول را چاپ میکند
-
-    # ==================== STEP 3: Load model & tokenizer ====================
+    # ==================== STEP 3: Load Tokenizer ====================
     base_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     if base_tokenizer.pad_token is None:
         base_tokenizer.pad_token = base_tokenizer.eos_token
 
     # ==================== STEP 4: Split & Convert ====================
-    train_data, valid_data = train_val_spliter(finall_dataset)
+    train_data, valid_data = train_val_splitter(final_dataset)
+    train_dataset, val_dataset = hf_dataset_converter(train_data, valid_data)
 
-    # تبدیل به دیتاست هاگینگ‌فیس
-    train_dataset, val_dataset = HF_datset_convertor(train_data, valid_data)
-
-    # ❌ مرحله process_datasets کاملاً حذف شد ❌
-
-    # ==================== STEP 5: Load Quantized Model ====================
+    # ==================== STEP 5: Load Quantized Model & Apply QLoRA ====================
     quantized_model = load_quantized_model(MODEL_NAME)
     qlora_model = apply_qlora(quantized_model)
 
