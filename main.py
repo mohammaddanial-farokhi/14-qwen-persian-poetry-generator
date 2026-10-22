@@ -416,6 +416,7 @@ if __name__ == "__main__":
 
     # ==================== STEP 1: Load Dataset ====================
     raw_data = load_data(DATA_PATH)
+    # dataset_first_look(raw_data)
 
     # ==================== STEP 2: Preprocess Data ====================
     remove_dup_data = remove_duplicates(raw_data, subset=("poet", "poem"), normalize=True)
